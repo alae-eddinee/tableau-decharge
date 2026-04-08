@@ -129,7 +129,10 @@ def update_excel(excel_bytes: bytes, pdf_data: list) -> tuple[bytes, list, list]
 
 def convert_xls_to_xlsx_bytes(xls_bytes: bytes, original_name: str) -> bytes:
     """Convertit un .xls en .xlsx via Excel COM (Windows uniquement)."""
-    import win32com.client
+    try:
+        import win32com.client
+    except ImportError:
+        raise RuntimeError("La conversion .xls → .xlsx via Excel COM n'est disponible que sous Windows. Veuillez convertir votre fichier en .xlsx avant de l'importer.")
 
     with tempfile.TemporaryDirectory() as tmp:
         xls_path = Path(tmp) / original_name
