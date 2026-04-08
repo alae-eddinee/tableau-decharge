@@ -1,0 +1,5 @@
+excel/
+input_pdf/
+output/
+__pycache__/
+*.pyc
