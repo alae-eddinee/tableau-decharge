@@ -1,18 +1,22 @@
 """
-app.py — Interface Streamlit pour decharge_to_excel
+app.py — Interface Streamlit pour décharge + tableau écheances AT
 """
 
 import io
 import re
+import datetime
 import tempfile
 from pathlib import Path
 
 import pdfplumber
 import openpyxl
+import pandas as pd
 import streamlit as st
 
+from echeance_analysis import generate_echeance_excel, FAMILLE_COLORS, FAMILLE_REMORQUE_PCT
+
 # ─────────────────────────────────────────────
-# Logique métier (reprise de decharge_to_excel.py)
+# Logique métier — Décharge (Tab 1)
 # ─────────────────────────────────────────────
 
 QTE_BRUT_X_MIN = 610
@@ -128,17 +132,17 @@ def update_excel(excel_bytes: bytes, pdf_data: list) -> tuple[bytes, list, list]
 
 
 def convert_xls_to_xlsx_bytes(xls_bytes: bytes, original_name: str) -> bytes:
-    """Convertit un .xls en .xlsx via Excel COM (Windows uniquement)."""
     try:
         import win32com.client
     except ImportError:
-        raise RuntimeError("La conversion .xls → .xlsx via Excel COM n'est disponible que sous Windows. Veuillez convertir votre fichier en .xlsx avant de l'importer.")
-
+        raise RuntimeError(
+            "La conversion .xls → .xlsx via Excel COM n'est disponible que sous Windows. "
+            "Veuillez convertir votre fichier en .xlsx avant de l'importer."
+        )
     with tempfile.TemporaryDirectory() as tmp:
         xls_path = Path(tmp) / original_name
         xlsx_path = xls_path.with_suffix('.xlsx')
         xls_path.write_bytes(xls_bytes)
-
         excel = win32com.client.Dispatch('Excel.Application')
         excel.Visible = False
         excel.DisplayAlerts = False
@@ -148,86 +152,152 @@ def convert_xls_to_xlsx_bytes(xls_bytes: bytes, original_name: str) -> bytes:
             wb.Close(False)
         finally:
             excel.Quit()
-
         return xlsx_path.read_bytes()
 
 
 # ─────────────────────────────────────────────
-# Interface Streamlit
+# Page config
 # ─────────────────────────────────────────────
 
-st.set_page_config(page_title="Décharge → Excel", page_icon="📊", layout="centered")
-st.title("📊 Mise à jour tableau de décharge")
-st.markdown("Importez le fichier Excel AT et le PDF Décharge pour mettre à jour les formules QTE.REST.")
+st.set_page_config(page_title="AT Medidis", page_icon="📊", layout="wide")
+st.title("📊 AT Medidis — Outils d'analyse")
 
-col1, col2 = st.columns(2)
-with col1:
-    excel_file = st.file_uploader("Fichier Excel (.xls / .xlsx)", type=["xls", "xlsx"])
-with col2:
-    pdf_file = st.file_uploader("PDF Décharge", type=["pdf"])
+tab1, tab2 = st.tabs(["🔄 Mise à jour décharge", "📅 Tableau suivi échéances"])
 
-if excel_file and pdf_file:
-    if st.button("Lancer la mise à jour", type="primary"):
-        with st.spinner("Traitement en cours…"):
 
-            # --- Lecture des fichiers ---
-            pdf_bytes = pdf_file.read()
-            excel_bytes = excel_file.read()
-            excel_name = excel_file.name
+# ─────────────────────────────────────────────
+# Tab 1 — Mise à jour décharge
+# ─────────────────────────────────────────────
 
-            # Conversion XLS → XLSX si nécessaire
-            if excel_name.lower().endswith('.xls'):
-                try:
-                    with st.spinner("Conversion .xls → .xlsx via Excel…"):
-                        excel_bytes = convert_xls_to_xlsx_bytes(excel_bytes, excel_name)
-                    excel_name = Path(excel_name).stem + '.xlsx'
-                except Exception as e:
-                    st.error(f"Échec de la conversion XLS : {e}")
+with tab1:
+    st.subheader("Mise à jour tableau de décharge")
+    st.markdown("Importez le fichier Excel AT et le PDF Décharge pour mettre à jour les formules QTE.REST.")
+
+    col1, col2 = st.columns(2)
+    with col1:
+        excel_file = st.file_uploader("Fichier Excel (.xls / .xlsx)", type=["xls", "xlsx"],
+                                      key="tab1_excel")
+    with col2:
+        pdf_file = st.file_uploader("PDF Décharge", type=["pdf"], key="tab1_pdf")
+
+    if excel_file and pdf_file:
+        if st.button("Lancer la mise à jour", type="primary", key="tab1_run"):
+            with st.spinner("Traitement en cours…"):
+                pdf_bytes   = pdf_file.read()
+                excel_bytes = excel_file.read()
+                excel_name  = excel_file.name
+
+                if excel_name.lower().endswith('.xls'):
+                    try:
+                        with st.spinner("Conversion .xls → .xlsx via Excel…"):
+                            excel_bytes = convert_xls_to_xlsx_bytes(excel_bytes, excel_name)
+                        excel_name = Path(excel_name).stem + '.xlsx'
+                    except Exception as e:
+                        st.error(f"Échec de la conversion XLS : {e}")
+                        st.stop()
+
+                pdf_data, pdf_warnings = extract_pdf_data(pdf_bytes)
+
+                if pdf_warnings:
+                    for w in pdf_warnings:
+                        st.warning(w)
+
+                if not pdf_data:
+                    st.error("Aucune donnée extraite du PDF. Vérifiez le fichier.")
                     st.stop()
 
-            # --- Extraction PDF ---
-            pdf_data, pdf_warnings = extract_pdf_data(pdf_bytes)
+                st.subheader(f"Données extraites du PDF — {len(pdf_data)} produit(s)")
+                df = pd.DataFrame(pdf_data, columns=["DUM N°", "Qté BRUT"])
+                st.dataframe(df, use_container_width=True, hide_index=True)
 
-            if pdf_warnings:
-                for w in pdf_warnings:
-                    st.warning(w)
+                result_bytes, updated, not_found = update_excel(excel_bytes, pdf_data)
 
-            if not pdf_data:
-                st.error("Aucune donnée extraite du PDF. Vérifiez le fichier.")
-                st.stop()
+                st.subheader("Rapport")
+                if updated:
+                    st.success(f"{len(updated)} ligne(s) mise(s) à jour")
+                    rows_report = []
+                    for dum, sheet, row_num, old, new in updated:
+                        rows_report.append({"DUM N°": dum, "Onglet": sheet,
+                                            "Ligne": row_num, "Avant": old, "Après": new})
+                    st.dataframe(pd.DataFrame(rows_report), use_container_width=True, hide_index=True)
+                else:
+                    st.warning("Aucune ligne mise à jour.")
 
-            # --- Aperçu des données PDF ---
-            st.subheader(f"Données extraites du PDF — {len(pdf_data)} produit(s)")
-            import pandas as pd
-            df = pd.DataFrame(pdf_data, columns=["DUM N°", "Qté BRUT"])
-            st.dataframe(df, use_container_width=True, hide_index=True)
+                if not_found:
+                    st.error(f"{len(not_found)} DUM N° non trouvé(s) dans les 2 premiers onglets :")
+                    for d in not_found:
+                        st.markdown(f"- `{d}`")
 
-            # --- Mise à jour Excel ---
-            result_bytes, updated, not_found = update_excel(excel_bytes, pdf_data)
+                output_name = Path(excel_name).stem + '_MAJ.xlsx'
+                st.download_button(
+                    label="⬇️ Télécharger le fichier mis à jour",
+                    data=result_bytes,
+                    file_name=output_name,
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                )
+    else:
+        st.info("Veuillez importer les deux fichiers pour continuer.")
 
-            # --- Rapport ---
-            st.subheader("Rapport")
-            if updated:
-                st.success(f"{len(updated)} ligne(s) mise(s) à jour")
-                rows = []
-                for dum, sheet, row_num, old, new in updated:
-                    rows.append({"DUM N°": dum, "Onglet": sheet, "Ligne": row_num, "Avant": old, "Après": new})
-                st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
-            else:
-                st.warning("Aucune ligne mise à jour.")
 
-            if not_found:
-                st.error(f"{len(not_found)} DUM N° non trouvé(s) dans les 2 premiers onglets :")
-                for d in not_found:
-                    st.markdown(f"- `{d}`")
+# ─────────────────────────────────────────────
+# Tab 2 — Tableau suivi échéances AT
+# ─────────────────────────────────────────────
 
-            # --- Téléchargement ---
-            output_name = Path(excel_name).stem + '_MAJ.xlsx'
+with tab2:
+    st.subheader("Tableau de suivi des échéances AT")
+    st.markdown(
+        "Importez le fichier AT Excel (onglet 2 : *MAJ-ECH compte*). "
+        "L'analyse génère un tableau Gantt par dossier + le récapitulatif des remorques par famille."
+    )
+
+    col_a, col_b = st.columns([2, 1])
+    with col_a:
+        at_file = st.file_uploader("Fichier AT Excel (.xlsx)", type=["xlsx"], key="tab2_excel")
+    with col_b:
+        analysis_date = st.date_input(
+            "Date d'analyse",
+            value=datetime.date.today(),
+            help="La colonne noire (limite 24 mois) sera placée 24 mois après cette date.",
+            key="tab2_date",
+        )
+
+    # Legend
+    with st.expander("Légende couleurs & paramètres remorques"):
+        legend_rows = []
+        for fam, color in FAMILLE_COLORS.items():
+            pct = FAMILLE_REMORQUE_PCT.get(fam)
+            legend_rows.append({
+                "Famille":        fam,
+                "% remorque":     f"{pct}%" if pct else "—",
+                "KG / remorque":  f"{int(pct/100*33000):,}" if pct else "—",
+            })
+        st.dataframe(pd.DataFrame(legend_rows), use_container_width=True, hide_index=True)
+        st.caption("Capacité totale d'une remorque : 33 000 kg")
+
+    if at_file:
+        if st.button("Générer le tableau", type="primary", key="tab2_run"):
+            with st.spinner("Génération en cours…"):
+                try:
+                    result_bytes, summary = generate_echeance_excel(
+                        at_file.read(), analysis_date
+                    )
+                except Exception as e:
+                    st.error(f"Erreur lors de la génération : {e}")
+                    st.stop()
+
+            # Summary metrics
+            st.success("Tableau généré avec succès !")
+            m1, m2, m3 = st.columns(3)
+            m1.metric("Dossiers", summary["nb_dossiers"])
+            m2.metric("Période", f"{summary['start_label']} → {summary['deadline_label']}")
+            m3.metric("Limite 24 mois", summary["deadline_label"])
+
+            output_name = Path(at_file.name).stem + '_ECHEANCES.xlsx'
             st.download_button(
-                label="⬇️ Télécharger le fichier mis à jour",
+                label="⬇️ Télécharger le tableau des échéances",
                 data=result_bytes,
                 file_name=output_name,
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             )
-else:
-    st.info("Veuillez importer les deux fichiers pour continuer.")
+    else:
+        st.info("Importez le fichier AT Excel pour générer le tableau.")
