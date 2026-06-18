@@ -3,3 +3,6 @@ input_pdf/
 output/
 __pycache__/
 *.pyc
+*.xlsx
+*.xls
+*.pdf

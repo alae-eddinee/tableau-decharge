@@ -92,6 +92,14 @@ def format_number(value: float) -> str:
     return f'{value:g}'
 
 
+def find_qte_rest_col(ws, fallback=QTE_REST_COL):
+    for row in ws.iter_rows(min_row=1, max_row=5):
+        for cell in row:
+            if cell.value and isinstance(cell.value, str) and 'QTE.REST' in cell.value.upper():
+                return cell.column
+    return fallback
+
+
 def update_excel(excel_bytes: bytes, pdf_data: list) -> tuple[bytes, list, list]:
     wb = openpyxl.load_workbook(io.BytesIO(excel_bytes))
     sheets = wb.worksheets
@@ -104,6 +112,7 @@ def update_excel(excel_bytes: bytes, pdf_data: list) -> tuple[bytes, list, list]
         found_anywhere = False
 
         for ws in sheets[:2]:
+            qte_rest_col = find_qte_rest_col(ws)
             for row in ws.iter_rows(min_row=1, max_row=ws.max_row):
                 cell_val = row[DUM_COL - 1].value
                 if not (cell_val and isinstance(cell_val, str)):
@@ -111,7 +120,7 @@ def update_excel(excel_bytes: bytes, pdf_data: list) -> tuple[bytes, list, list]
                 if normalize_dum(cell_val) != key:
                     continue
                 found_anywhere = True
-                cell = ws.cell(row=row[0].row, column=QTE_REST_COL)
+                cell = ws.cell(row=row[0].row, column=qte_rest_col)
                 current = cell.value
                 if isinstance(current, str) and current.startswith('='):
                     new_formula = f'{current}-{subtraction}'
