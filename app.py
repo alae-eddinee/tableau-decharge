@@ -8,10 +8,12 @@ import datetime
 import tempfile
 from pathlib import Path
 
+import zipfile
 import pdfplumber
 import openpyxl
 import pandas as pd
 import streamlit as st
+from pypdf import PdfWriter, PdfReader
 
 from echeance_analysis import generate_echeance_excel, FAMILLE_COLORS, FAMILLE_REMORQUE_PCT
 
@@ -171,7 +173,7 @@ def convert_xls_to_xlsx_bytes(xls_bytes: bytes, original_name: str) -> bytes:
 st.set_page_config(page_title="AT Medidis", page_icon="📊", layout="wide")
 st.title("📊 AT Medidis — Outils d'analyse")
 
-tab1, tab2 = st.tabs(["🔄 Mise à jour décharge", "📅 Tableau suivi échéances"])
+tab1, tab2, tab3 = st.tabs(["🔄 Mise à jour décharge", "📅 Tableau suivi échéances", "📎 Fusion factures PDF"])
 
 
 # ─────────────────────────────────────────────
@@ -310,3 +312,73 @@ with tab2:
             )
     else:
         st.info("Importez le fichier AT Excel pour générer le tableau.")
+
+
+# ─────────────────────────────────────────────
+# Tab 3 — Fusion factures PDF
+# ─────────────────────────────────────────────
+
+with tab3:
+    st.subheader("Fusion des factures PDF")
+    st.markdown(
+        "Pour chaque facture, les 2 pages supplémentaires seront insérées juste après. "
+        "Toutes les factures sont ensuite fusionnées en un seul PDF."
+    )
+
+    col_f1, col_f2 = st.columns(2)
+    with col_f1:
+        facture_files = st.file_uploader(
+            "Factures PDF (sélectionnez plusieurs fichiers)",
+            type=["pdf"],
+            accept_multiple_files=True,
+            key="tab3_factures",
+        )
+    with col_f2:
+        extra_files = st.file_uploader(
+            "Pages supplémentaires à ajouter après chaque facture",
+            type=["pdf"],
+            accept_multiple_files=True,
+            key="tab3_extras",
+        )
+
+    if facture_files and extra_files:
+        st.markdown(f"**{len(facture_files)} facture(s)** · **{len(extra_files)} fichier(s) supplémentaire(s)**")
+
+        facture_files_sorted = sorted(facture_files, key=lambda f: f.name)
+        with st.expander("Ordre des factures (glissez pour réordonner via tri alphabétique)"):
+            for i, f in enumerate(facture_files_sorted, 1):
+                st.markdown(f"{i}. {f.name}")
+
+        if st.button("Fusionner les PDF", type="primary", key="tab3_run"):
+            with st.spinner("Fusion en cours…"):
+                facture_bytes_list = [(f.name, f.read()) for f in facture_files_sorted]
+                extra_bytes_list = [ef.read() for ef in extra_files]
+
+                zip_buf = io.BytesIO()
+                with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED) as zf:
+                    for fac_name, fac_bytes in facture_bytes_list:
+                        writer = PdfWriter()
+                        for page in PdfReader(io.BytesIO(fac_bytes)).pages:
+                            writer.add_page(page)
+                        for extra_bytes in extra_bytes_list:
+                            for page in PdfReader(io.BytesIO(extra_bytes)).pages:
+                                writer.add_page(page)
+                        pdf_buf = io.BytesIO()
+                        writer.write(pdf_buf)
+                        zf.writestr(fac_name, pdf_buf.getvalue())
+
+                zip_bytes = zip_buf.getvalue()
+
+            st.success(f"{len(facture_bytes_list)} PDF(s) générés — un par facture avec les pages supplémentaires")
+            st.download_button(
+                label="⬇️ Télécharger le ZIP (tous les PDF)",
+                data=zip_bytes,
+                file_name="factures_avec_annexes.zip",
+                mime="application/zip",
+            )
+    elif facture_files and not extra_files:
+        st.info("Ajoutez les pages supplémentaires à insérer après chaque facture.")
+    elif extra_files and not facture_files:
+        st.info("Ajoutez les fichiers de factures à fusionner.")
+    else:
+        st.info("Importez les factures et les pages supplémentaires pour continuer.")
