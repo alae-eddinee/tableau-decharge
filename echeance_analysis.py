@@ -148,20 +148,25 @@ def generate_echeance_excel(excel_bytes: bytes, analysis_date: datetime.date) ->
     wb_src = load_workbook(io.BytesIO(excel_bytes), data_only=False)
     ws_src = wb_src.worksheets[1]
 
+    # Column positions (1-based): A=DUM, E=vrais famille, G=échéance, U=P.NE KG restant
+    COL_DUM_SRC, COL_FAM_SRC, COL_ECH_SRC, COL_PNE_SRC = 1, 5, 7, 21
+
     rows = []
-    for i, xl_row in enumerate(ws_src.iter_rows(min_row=1)):
-        if i < 2:
-            continue
-        dum_cell = xl_row[0].value
+    for xl_row in ws_src.iter_rows(min_row=3):
+        dum_cell = ws_src.cell(xl_row[0].row, COL_DUM_SRC).value
         if dum_cell is None:
             continue
-        dum       = str(dum_cell).strip()
-        vrais_fam = str(xl_row[4].value).strip() if xl_row[4].value else ""
-        echeance  = xl_row[6].value
-        # Resolve échéance through formula if needed
+        dum = str(dum_cell).strip()
+
+        fam_val = ws_src.cell(xl_row[0].row, COL_FAM_SRC).value
+        vrais_fam = str(fam_val).strip() if fam_val else ""
+
+        echeance = ws_src.cell(xl_row[0].row, COL_ECH_SRC).value
         if isinstance(echeance, str) and echeance.startswith("="):
-            echeance = _resolve_cell(ws_src, xl_row[0].row, 7)
-        pne_rest = _resolve_cell(ws_src, xl_row[0].row, 21)
+            echeance = _resolve_cell(ws_src, xl_row[0].row, COL_ECH_SRC)
+
+        pne_rest = _resolve_cell(ws_src, xl_row[0].row, COL_PNE_SRC)
+
         if isinstance(echeance, datetime.datetime) and pne_rest is not None:
             rows.append({
                 "dum":      dum,
