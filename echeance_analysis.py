@@ -74,6 +74,32 @@ def _add_deadline_months(d, n):
     return datetime.date(y, m, 1)
 
 
+def _force_recalculate(excel_bytes: bytes) -> bytes:
+    """Open the file in Excel COM, force full recalculation, return updated bytes."""
+    import tempfile
+    from pathlib import Path
+    try:
+        import win32com.client
+    except ImportError:
+        return excel_bytes
+
+    with tempfile.TemporaryDirectory() as tmp:
+        src = Path(tmp) / "source.xlsx"
+        dst = Path(tmp) / "recalculated.xlsx"
+        src.write_bytes(excel_bytes)
+        excel = win32com.client.Dispatch("Excel.Application")
+        excel.Visible = False
+        excel.DisplayAlerts = False
+        try:
+            wb = excel.Workbooks.Open(str(src.resolve()))
+            excel.CalculateFull()
+            wb.SaveAs(str(dst.resolve()), FileFormat=51)
+            wb.Close(False)
+        finally:
+            excel.Quit()
+        return dst.read_bytes()
+
+
 def generate_echeance_excel(excel_bytes: bytes, analysis_date: datetime.date) -> tuple[bytes, dict]:
     """
     Read sheet 2 of the uploaded AT Excel file, build the écheances tableau,
@@ -82,6 +108,9 @@ def generate_echeance_excel(excel_bytes: bytes, analysis_date: datetime.date) ->
     summary_dict keys:
         nb_dossiers, start_month, end_month, deadline_label, familles_totals
     """
+    # ── Force Excel to recalculate so data_only reads cached values ───────────
+    excel_bytes = _force_recalculate(excel_bytes)
+
     # ── Read source data (sheet index 1) ──────────────────────────────────────
     wb_src = load_workbook(io.BytesIO(excel_bytes), read_only=True, data_only=True)
     ws_src = wb_src.worksheets[1]
