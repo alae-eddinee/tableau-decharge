@@ -2,14 +2,17 @@
 echeance_analysis.py — Génère le tableau de suivi des échéances AT (in-memory).
 """
 
+import ast
 import io
+import operator
+import re
 import datetime
 from collections import OrderedDict
 
 import openpyxl
 from openpyxl import load_workbook
 from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
-from openpyxl.utils import get_column_letter
+from openpyxl.utils import get_column_letter, column_index_from_string
 
 # ── Colour palette keyed on "vrais famille" ──────────────────────────────────
 FAMILLE_COLORS = {
@@ -74,57 +77,90 @@ def _add_deadline_months(d, n):
     return datetime.date(y, m, 1)
 
 
-def _force_recalculate(excel_bytes: bytes) -> bytes:
-    """Open the file in Excel COM, force full recalculation, return updated bytes."""
-    import tempfile
-    from pathlib import Path
-    try:
-        import win32com.client
-    except ImportError:
-        return excel_bytes
+_ARITH_OPS = {
+    ast.Add: operator.add,
+    ast.Sub: operator.sub,
+    ast.Mult: operator.mul,
+    ast.Div: operator.truediv,
+    ast.USub: operator.neg,
+    ast.UAdd: operator.pos,
+}
 
-    with tempfile.TemporaryDirectory() as tmp:
-        src = Path(tmp) / "source.xlsx"
-        dst = Path(tmp) / "recalculated.xlsx"
-        src.write_bytes(excel_bytes)
-        excel = win32com.client.Dispatch("Excel.Application")
-        excel.Visible = False
-        excel.DisplayAlerts = False
-        try:
-            wb = excel.Workbooks.Open(str(src.resolve()))
-            excel.CalculateFull()
-            wb.SaveAs(str(dst.resolve()), FileFormat=51)
-            wb.Close(False)
-        finally:
-            excel.Quit()
-        return dst.read_bytes()
+
+def _safe_eval(expr: str):
+    """Evaluate a pure-numeric arithmetic expression with no cell references."""
+    def _node(n):
+        if isinstance(n, ast.Constant) and isinstance(n.value, (int, float)):
+            return n.value
+        if isinstance(n, ast.BinOp):
+            op = _ARITH_OPS.get(type(n.op))
+            if op:
+                return op(_node(n.left), _node(n.right))
+        if isinstance(n, ast.UnaryOp):
+            op = _ARITH_OPS.get(type(n.op))
+            if op:
+                return op(_node(n.operand))
+        raise ValueError(f"unsupported: {n}")
+    try:
+        return _node(ast.parse(expr, mode="eval").body)
+    except Exception:
+        return None
+
+
+def _resolve_cell(ws, row: int, col: int, _seen: set | None = None):
+    """Return the numeric value of a cell, evaluating simple same-sheet formulas."""
+    if _seen is None:
+        _seen = set()
+    key = (row, col)
+    if key in _seen:
+        return None
+    _seen.add(key)
+
+    val = ws.cell(row, col).value
+    if val is None:
+        return None
+    if not isinstance(val, str) or not val.startswith("="):
+        return val if isinstance(val, (int, float, datetime.datetime, datetime.date)) else None
+
+    # Strip leading = and optional leading +
+    expr = val[1:].lstrip("+")
+
+    # Replace all A1-style same-sheet references (no sheet prefix) with their numeric values
+    def _sub_ref(m):
+        ref_col = column_index_from_string(m.group(1).upper())
+        ref_row = int(m.group(2))
+        v = _resolve_cell(ws, ref_row, ref_col, _seen)
+        if isinstance(v, (int, float)):
+            return str(v)
+        return "0"
+
+    expr = re.sub(r"(?<!['\w])([A-Za-z]+)(\d+)", _sub_ref, expr)
+    return _safe_eval(expr)
 
 
 def generate_echeance_excel(excel_bytes: bytes, analysis_date: datetime.date) -> tuple[bytes, dict]:
     """
     Read sheet 2 of the uploaded AT Excel file, build the écheances tableau,
     and return (xlsx_bytes, summary_dict).
-
-    summary_dict keys:
-        nb_dossiers, start_month, end_month, deadline_label, familles_totals
     """
-    # ── Force Excel to recalculate so data_only reads cached values ───────────
-    excel_bytes = _force_recalculate(excel_bytes)
-
-    # ── Read source data (sheet index 1) ──────────────────────────────────────
-    wb_src = load_workbook(io.BytesIO(excel_bytes), read_only=True, data_only=True)
+    # ── Read source data (sheet index 1) — formulas kept so we can evaluate them
+    wb_src = load_workbook(io.BytesIO(excel_bytes), data_only=False)
     ws_src = wb_src.worksheets[1]
 
     rows = []
-    for i, row in enumerate(ws_src.iter_rows(values_only=True)):
+    for i, xl_row in enumerate(ws_src.iter_rows(min_row=1)):
         if i < 2:
             continue
-        if row[0] is None:
+        dum_cell = xl_row[0].value
+        if dum_cell is None:
             continue
-        dum       = str(row[0]).strip()
-        vrais_fam = str(row[4]).strip() if row[4] else ""
-        echeance  = row[6]
-        pne_rest  = row[20]
+        dum       = str(dum_cell).strip()
+        vrais_fam = str(xl_row[4].value).strip() if xl_row[4].value else ""
+        echeance  = xl_row[6].value
+        # Resolve échéance through formula if needed
+        if isinstance(echeance, str) and echeance.startswith("="):
+            echeance = _resolve_cell(ws_src, xl_row[0].row, 7)
+        pne_rest = _resolve_cell(ws_src, xl_row[0].row, 21)
         if isinstance(echeance, datetime.datetime) and pne_rest is not None:
             rows.append({
                 "dum":      dum,
