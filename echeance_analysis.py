@@ -126,10 +126,11 @@ def _resolve_cell(ws, row: int, col: int, _seen: set | None = None):
     expr = val[1:].lstrip("+")
 
     # Replace all A1-style same-sheet references (no sheet prefix) with their numeric values
+    # Pass a copy of _seen so sibling resolutions don't pollute each other's cycle check
     def _sub_ref(m):
         ref_col = column_index_from_string(m.group(1).upper())
         ref_row = int(m.group(2))
-        v = _resolve_cell(ws, ref_row, ref_col, _seen)
+        v = _resolve_cell(ws, ref_row, ref_col, set(_seen))
         if isinstance(v, (int, float)):
             return str(v)
         return "0"
