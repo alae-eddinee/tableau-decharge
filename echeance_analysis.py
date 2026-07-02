@@ -148,8 +148,8 @@ def generate_echeance_excel(excel_bytes: bytes, analysis_date: datetime.date) ->
     wb_src = load_workbook(io.BytesIO(excel_bytes), data_only=False)
     ws_src = wb_src.worksheets[1]
 
-    # Column positions (1-based): A=DUM, E=vrais famille, G=échéance, U=P.NE KG restant
-    COL_DUM_SRC, COL_FAM_SRC, COL_ECH_SRC, COL_PNE_SRC = 1, 5, 7, 21
+    # Column positions (1-based): A=DUM, E=vrais famille, G=échéance, M=VAL REST, U=P.NE KG restant
+    COL_DUM_SRC, COL_FAM_SRC, COL_ECH_SRC, COL_VAL_SRC, COL_PNE_SRC = 1, 5, 7, 13, 21
 
     rows = []
     for xl_row in ws_src.iter_rows(min_row=3):
@@ -166,6 +166,7 @@ def generate_echeance_excel(excel_bytes: bytes, analysis_date: datetime.date) ->
             echeance = _resolve_cell(ws_src, xl_row[0].row, COL_ECH_SRC)
 
         pne_rest = _resolve_cell(ws_src, xl_row[0].row, COL_PNE_SRC)
+        val_rest = _resolve_cell(ws_src, xl_row[0].row, COL_VAL_SRC) or 0
 
         if isinstance(echeance, datetime.datetime) and pne_rest is not None:
             rows.append({
@@ -173,6 +174,7 @@ def generate_echeance_excel(excel_bytes: bytes, analysis_date: datetime.date) ->
                 "famille":  vrais_fam,
                 "echeance": echeance,
                 "qte_rest": pne_rest,
+                "val_rest": val_rest,
             })
 
     rows.sort(key=lambda r: r["echeance"])
@@ -313,14 +315,20 @@ def generate_echeance_excel(excel_bytes: bytes, analysis_date: datetime.date) ->
     fam_col_main = get_column_letter(COL_FAM)
     qte_col_main = get_column_letter(COL_QTE)
 
-    ws2.merge_cells("A1:D1")
+    # Pre-compute VAL REST totals per famille
+    val_rest_by_fam = {}
+    for r in rows:
+        val_rest_by_fam[r["famille"]] = val_rest_by_fam.get(r["famille"], 0) + r["val_rest"]
+
+    ws2.merge_cells("A1:F1")
     t2 = ws2.cell(1, 1, "TOTAUX PAR FAMILLE")
     t2.fill      = HEADER_FILL
     t2.font      = Font(bold=True, color="FFFFFF", size=12)
     t2.alignment = Alignment(horizontal="center", vertical="center")
     ws2.row_dimensions[1].height = 22
 
-    for col, h in enumerate(["FAMILLE","P. NE KG REST.","% REMORQUE","NB REMORQUES"], 1):
+    headers = ["FAMILLE", "P. NE KG REST.", "% REMORQUE", "NB REMORQUES", "VAL REST (DH)", "NB REM (valeur)"]
+    for col, h in enumerate(headers, 1):
         cell = ws2.cell(2, col, h)
         cell.fill      = SUBHEAD_FILL
         cell.font      = SUBHEAD_FONT
@@ -368,11 +376,17 @@ def generate_echeance_excel(excel_bytes: bytes, analysis_date: datetime.date) ->
             rc = w2(4, "—")
             rc.font = bfont
 
+        fam_val_rest = val_rest_by_fam.get(fam, 0)
+        w2(5, fam_val_rest, fmt='#,##0.00', align="right")
+
+        vrc = w2(6, fam_val_rest * 2 / 500_000, fmt='#,##0.00')
+        vrc.font = bfont
+
         ws2.row_dimensions[row_num].height = 20
 
     # Total row
     total_row = last_data + 1
-    for col in range(1, 5):
+    for col in range(1, 7):
         cell = ws2.cell(total_row, col)
         cell.fill      = HEADER_FILL
         cell.font      = Font(bold=True, color="FFFFFF", size=9)
@@ -387,12 +401,21 @@ def generate_echeance_excel(excel_bytes: bytes, analysis_date: datetime.date) ->
     trc = ws2.cell(total_row, 4, f"=B{total_row}/33000")
     trc.number_format = '#,##0.00'
     trc.alignment     = Alignment(horizontal="center", vertical="center")
+    total_val = sum(val_rest_by_fam.values())
+    tvc = ws2.cell(total_row, 5, total_val)
+    tvc.number_format = '#,##0.00'
+    tvc.alignment     = Alignment(horizontal="right", vertical="center")
+    tvrc = ws2.cell(total_row, 6, total_val * 2 / 500_000)
+    tvrc.number_format = '#,##0.00'
+    tvrc.alignment     = Alignment(horizontal="center", vertical="center")
     ws2.row_dimensions[total_row].height = 20
 
     ws2.column_dimensions["A"].width = 18
     ws2.column_dimensions["B"].width = 16
     ws2.column_dimensions["C"].width = 14
     ws2.column_dimensions["D"].width = 14
+    ws2.column_dimensions["E"].width = 16
+    ws2.column_dimensions["F"].width = 16
 
     # ── Serialise ─────────────────────────────────────────────────────────────
     buf = io.BytesIO()
